@@ -11,9 +11,14 @@ class VehicleDetector {
   late Interpreter interpreter;
   /// Optional class labels for the model. Adjust to match your model's classes.
   List<String> labels = ['bus', 'car', 'jeep', 'plate no-', 'truck'];
+  
+  /// Vehicle class IDs (excluding plate)
+  static const Set<int> vehicleClassIds = {0, 1}; // bus, car, jeep, truck
+  /// Plate class ID
+  static const int plateClassId = 1;
 
   Future<void> loadModel() async {
-  interpreter = await Interpreter.fromAsset('assets/models/11latest.tflite');
+  interpreter = await Interpreter.fromAsset('assets/models/detectlatest.tflite');
 }
 
 
@@ -218,7 +223,60 @@ class VehicleDetector {
 
     final finalDetections = nms(detections, iouThresh: 0.45);
     finalDetections.sort((a, b) => (b['score'] as double).compareTo(a['score'] as double));
+    
+    // Print detection summary
+    _printDetectionSummary(finalDetections);
+    
     return finalDetections;
+  }
+
+  /// Print a summary of detections to console with class breakdown
+  void _printDetectionSummary(List<Map<String, dynamic>> detections) {
+    print('\n========== DETECTION SUMMARY ==========');
+    
+    if (detections.isEmpty) {
+      print('NO DETECTIONS FOUND');
+       return;
+    }
+    
+    print('DETECTIONS FOUND: ${detections.length}');
+    
+    // Group by class
+    final byClass = <int, List<Map<String, dynamic>>>{};
+    for (final det in detections) {
+      final classId = det['classId'] as int?;
+      if (classId != null) {
+        byClass.putIfAbsent(classId, () => []).add(det);
+      }
+    }
+    
+    // Print breakdown by class
+    print('\nDETAILS BY CLASS:');
+    for (final classId in byClass.keys) {
+      final label = (classId >= 0 && classId < labels.length) ? labels[classId] : 'unknown_$classId';
+      final dets = byClass[classId]!;
+      final isVehicle = vehicleClassIds.contains(classId);
+      final type = isVehicle ? '🚗' : '📍';
+      
+      print('  $type $label (ID: $classId): ${dets.length} detections');
+      
+      // Show top 3 by confidence
+      final top3 = dets.take(3);
+      for (int i = 0; i < top3.length; i++) {
+        final det = top3.elementAt(i);
+        final score = det['score'] as double;
+        final confidence = (score * 100).toStringAsFixed(1);
+        final box = 'box=[${(det['xmin'] as double).toStringAsFixed(2)}, ${(det['ymin'] as double).toStringAsFixed(2)}, ${(det['xmax'] as double).toStringAsFixed(2)}, ${(det['ymax'] as double).toStringAsFixed(2)}]';
+        print('     #${i+1}: $confidence% confidence, $box');
+      }
+    }
+    
+    // Summary line
+    final vehicleCount = detections.where((d) => vehicleClassIds.contains(d['classId'] as int?)).length;
+    final plateCount = detections.where((d) => (d['classId'] as int?) == plateClassId).length;
+    
+    print('\nSUMMARY: $vehicleCount vehicle(s) + $plateCount plate(s) detected');
+  }
   }
 
   /// Return debug info for each output channel: min/max/mean and top-k indices/values.

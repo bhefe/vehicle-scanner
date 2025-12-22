@@ -20,6 +20,9 @@ class _ProcessScreenState extends State<ProcessScreen> {
   Map<String, dynamic>? topDetection;
   String modelStatus = 'Model not loaded';
   int detectionCount = 0;
+  int vehicleCount = 0;
+  int plateCount = 0;
+  String detectionStatus = ''; // Status message about what was detected
   List<Map<String, dynamic>>? debugInfo;
   String? annotatedPath;
 
@@ -56,7 +59,7 @@ class _ProcessScreenState extends State<ProcessScreen> {
     // Also collect debug info for the outputs so user can inspect channels
     debugInfo = await detector.debugOutputs(widget.imagePath, topK: 3);
     detectionCount = detections.length;
-    print('ProcessScreen.runPipeline: detections found: $detectionCount');
+    print('ProcessScreen.runPipeline: Total detections found: $detectionCount');
 
     // Always produce an annotated image so the user can see where the model fired
     // even if detections are below the confidence threshold.
@@ -74,6 +77,25 @@ class _ProcessScreenState extends State<ProcessScreen> {
       final classId = (d['classId'] ?? -1);
       return classId == 0 || classId == 1 || classId == 2 || classId == 4; // bus, car, jeep, truck
     }).toList();
+    
+    // Update vehicle and plate counts
+    vehicleCount = vehicles.length;
+    plateCount = plates.length;
+    
+    // Set detection status message
+    if (detectionCount == 0) {
+      detectionStatus = 'NO VEHICLE OR PLATE DETECTED';
+      print('Model did not detect any vehicles or plates in the image');
+    } else if (vehicleCount > 0 && plateCount > 0) {
+      detectionStatus = 'VEHICLE & PLATE DETECTED (${vehicleCount} vehicle(s), ${plateCount} plate(s))';
+      print('Detected ${vehicleCount} vehicle(s) and ${plateCount} plate(s)');
+    } else if (vehicleCount > 0) {
+      detectionStatus = 'VEHICLE DETECTED (${vehicleCount} vehicle(s), no plates found)';
+      print('Vehicle detected but no plate found');
+    } else if (plateCount > 0) {
+      detectionStatus = 'PLATE DETECTED (${plateCount} plate(s), no vehicles)';
+      print('Plate detected but no vehicle box found');
+    }
 
     // Function to check if OCR text contains plate-like patterns
     bool hasPlateText(String? text) {
@@ -93,9 +115,7 @@ class _ProcessScreenState extends State<ProcessScreen> {
       ];
       
       return platePatterns.any((pattern) => pattern.hasMatch(upper));
-    }
-
-    // Try ALL detections for plate-like text (comprehensive approach)
+    }    // Try ALL detections for plate-like text (comprehensive approach)
     String? foundPlate;
     String? foundCropPath;
     Map<String, dynamic>? foundDetection;
@@ -695,6 +715,44 @@ class _ProcessScreenState extends State<ProcessScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
+          // Detection Status Banner
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            margin: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: detectionStatus.contains('NO') ? Colors.red[100] : Colors.green[100],
+              border: Border.all(
+                color: detectionStatus.contains('NO') ? Colors.red : Colors.green,
+                width: 2,
+              ),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(
+              children: [
+                Text(
+                  detectionStatus,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: detectionStatus.contains('NO') ? Colors.red[900] : Colors.green[900],
+                  ),
+                ),
+                if (detectionCount > 0) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Model Status: $modelStatus',
+                    style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+                  ),
+                  Text(
+                    'Total Detections: $detectionCount (Vehicles: $vehicleCount, Plates: $plateCount)',
+                    style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+                  ),
+                ]
+              ],
+            ),
+          ),
           // Padding(
           //   padding: const EdgeInsets.all(8.0),
           //   child: Text('Status: $modelStatus • Detections: $detectionCount'),
