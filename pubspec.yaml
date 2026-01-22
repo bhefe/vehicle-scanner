@@ -65,7 +65,7 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/models/11latest.tflite
+    - assets/models/detectlatest.tflite
     # If you want to bundle sample images, add them under assets/images
     # and list them here. They must exist at build time. Example:
     # - assets/images/example.jpg

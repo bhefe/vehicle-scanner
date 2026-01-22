@@ -69,13 +69,13 @@ class _ProcessScreenState extends State<ProcessScreen> {
       annotatedPath = null;
     }
 
-    // Keep only plate detections (classId == 3)
-    final plates = detections.where((d) => (d['classId'] ?? -1) == 3).toList();
+    // Keep only plate detections (classId == 1)
+    final plates = detections.where((d) => (d['classId'] ?? -1) == VehicleDetector.plateClassId).toList();
     
-    // Get vehicle detections as fallback (bus, car, jeep, truck - classId 0,1,2,4)
+    // Get vehicle detections (classId == 0)
     final vehicles = detections.where((d) {
       final classId = (d['classId'] ?? -1);
-      return classId == 0 || classId == 1 || classId == 2 || classId == 4; // bus, car, jeep, truck
+      return classId == VehicleDetector.vehicleClassId;
     }).toList();
     
     // Update vehicle and plate counts

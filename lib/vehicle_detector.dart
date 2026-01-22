@@ -9,11 +9,11 @@ import 'package:path_provider/path_provider.dart';
 
 class VehicleDetector {
   late Interpreter interpreter;
-  /// Optional class labels for the model. Adjust to match your model's classes.
-  List<String> labels = ['bus', 'car', 'jeep', 'plate no-', 'truck'];
+  /// Class labels for the YOLOv8 model (2 classes: vehicle and plate)
+  List<String> labels = ['vehicle', 'plate number'];
   
-  /// Vehicle class IDs (excluding plate)
-  static const Set<int> vehicleClassIds = {0, 1}; // bus, car, jeep, truck
+  /// Vehicle class ID
+  static const int vehicleClassId = 0;
   /// Plate class ID
   static const int plateClassId = 1;
 
@@ -35,6 +35,7 @@ class VehicleDetector {
     final inputH = inputShape.length > 1 ? inputShape[1] : 0;
     final inputW = inputShape.length > 2 ? inputShape[2] : 0;
     if (inputH == 0 || inputW == 0) return [];
+    print('VehicleDetector: input shape [1, $inputH, $inputW, 3]');
     // Letterbox resize: preserve aspect ratio, pad to input size and remember scale/pad
     final origW = original.width.toDouble();
     final origH = original.height.toDouble();
@@ -91,9 +92,12 @@ class VehicleDetector {
     final channelCount = channelsFirst ? outShape[1] : outShape[2];
     final count = channelsFirst ? outShape[2] : outShape[1];
 
-    // heuristic: bbox channels 0..3. check for objectness channel (channel 4)
-    final hasObj = (channelCount - 5) >= 1;
-    final numClasses = hasObj ? channelCount - 5 : max(0, channelCount - 4);
+    print('VehicleDetector: output shape ${outShape}, channelsFirst=$channelsFirst, channels=$channelCount, detections=$count');
+
+    // YOLOv11 actual format: [1, 6, 8400]
+    // Channels: [0]=x, [1]=y, [2]=w, [3]=h, [4]=confidence, [5]=class_scores (might be 2 classes packed)
+    final hasObj = true; // YOLOv11 always has objectness at channel 4
+    final numClasses = 2; // YOLOv11 model has exactly 2 classes: vehicle and plate
 
     double sigmoid(double x) => 1.0 / (1.0 + exp(-x));
 
@@ -124,24 +128,36 @@ class VehicleDetector {
       final w = (wRaw.abs() > 1.0) ? sigmoid(wRaw) : wRaw.abs();
       final h = (hRaw.abs() > 1.0) ? sigmoid(hRaw) : hRaw.abs();
 
-      double obj = 1.0;
-      if (hasObj) {
-        obj = sigmoid(getVal(4, i));
-      }
+      // YOLOv11 format: channel 4 is confidence/objectness
+      double obj = sigmoid(getVal(4, i));
 
+      // YOLOv11: class probabilities - try to extract from channel 5
+      // With 6 channels total and 2 classes, the model might:
+      // Option A: Use channel 5 as a combined score or one class
+      // Option B: Have implicit second class as (1 - firstClass)
       int bestClass = -1;
       double bestScore = -double.infinity;
-      for (int c = 0; c < numClasses; c++) {
-        final rawCls = getVal(4 + (hasObj ? 1 : 0) + c, i);
-        final clsProb = sigmoid(rawCls);
-        final score = obj * clsProb;
-        if (score > bestScore) {
-          bestScore = score;
-          bestClass = c;
-        }
+      
+      // Try reading from channel 5 (assuming it's vehicle probability)
+      final vehicleProb = sigmoid(getVal(5, i));
+      final plateProb = 1.0 - vehicleProb; // Implicit plate probability
+      
+      // Compare both
+      final vehicleScore = obj * vehicleProb;
+      final plateScore = obj * plateProb;
+      
+      if (vehicleScore > plateScore) {
+        bestClass = 0; // vehicle
+        bestScore = vehicleScore;
+      } else {
+        bestClass = 1; // plate
+        bestScore = plateScore;
       }
 
       if (bestScore < confThreshold) continue;
+      
+      // Debug: log detections with valid class IDs
+      print('Detection: classId=$bestClass, score=${bestScore.toStringAsFixed(3)}, vehicleProb=${vehicleProb.toStringAsFixed(3)}, plateProb=${plateProb.toStringAsFixed(3)}');
 
       // Map box from letterboxed input coordinates back to original image normalized coords
       // Model likely outputs normalized coords relative to the input size (including padding)
@@ -255,7 +271,7 @@ class VehicleDetector {
     for (final classId in byClass.keys) {
       final label = (classId >= 0 && classId < labels.length) ? labels[classId] : 'unknown_$classId';
       final dets = byClass[classId]!;
-      final isVehicle = vehicleClassIds.contains(classId);
+      final isVehicle = (classId == vehicleClassId);
       final type = isVehicle ? '🚗' : '📍';
       
       print('  $type $label (ID: $classId): ${dets.length} detections');
@@ -272,11 +288,11 @@ class VehicleDetector {
     }
     
     // Summary line
-    final vehicleCount = detections.where((d) => vehicleClassIds.contains(d['classId'] as int?)).length;
+    final vehicleCount = detections.where((d) => (d['classId'] as int?) == vehicleClassId).length;
     final plateCount = detections.where((d) => (d['classId'] as int?) == plateClassId).length;
     
     print('\nSUMMARY: $vehicleCount vehicle(s) + $plateCount plate(s) detected');
-  }
+    print('=======================================\n');
   }
 
   /// Return debug info for each output channel: min/max/mean and top-k indices/values.
