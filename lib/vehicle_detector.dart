@@ -2,6 +2,7 @@
 
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:image/image.dart' as img;
@@ -9,7 +10,7 @@ import 'package:path_provider/path_provider.dart';
 
 class VehicleDetector {
   late Interpreter interpreter;
-  /// Class labels for the YOLOv8 model (2 classes: vehicle and plate)
+  /// Class labels for the YOLO model (2 classes: vehicle and plate)
   List<String> labels = ['vehicle', 'plate number'];
   
   /// Vehicle class ID
@@ -52,54 +53,90 @@ class VehicleDetector {
     const padG = 114;
     const padB = 114;
 
-    final input = List.generate(1, (_) {
-      return List.generate(inputH, (y) {
-        return List.generate(inputW, (x) {
-          // check if this pixel falls inside the pasted resized image
-          final sx = x - padX;
-          final sy = y - padY;
-          int r, g, b;
-          if (sx >= 0 && sx < resizedW && sy >= 0 && sy < resizedH) {
-            final px = resized.getPixel(sx, sy);
-            r = px.r.toInt();
-            g = px.g.toInt();
-            b = px.b.toInt();
-          } else {
-            r = padR;
-            g = padG;
-            b = padB;
-          }
+    // IMPORTANT: Avoid building a deeply nested Dart List for input.
+    // A [1,H,W,3] nested list causes massive allocations and can freeze the UI.
+    final inputBuffer = Float32List(inputH * inputW * 3);
+    var idx = 0;
+    for (int y = 0; y < inputH; y++) {
+      for (int x = 0; x < inputW; x++) {
+        // check if this pixel falls inside the pasted resized image
+        final sx = x - padX;
+        final sy = y - padY;
+        int r, g, b;
+        if (sx >= 0 && sx < resizedW && sy >= 0 && sy < resizedH) {
+          final px = resized.getPixel(sx, sy);
+          r = px.r.toInt();
+          g = px.g.toInt();
+          b = px.b.toInt();
+        } else {
+          r = padR;
+          g = padG;
+          b = padB;
+        }
 
-          final rf = r / 255.0;
-          final gf = g / 255.0;
-          final bf = b / 255.0;
-          return [rf, gf, bf];
-        });
-      });
-    });
+        inputBuffer[idx++] = r / 255.0;
+        inputBuffer[idx++] = g / 255.0;
+        inputBuffer[idx++] = b / 255.0;
+      }
+    }
+    final input = inputBuffer.reshape([1, inputH, inputW, 3]);
 
-    // Output currently observed as [1, 9, 8400]
+    // Output often looks like [1, C, N] (channels-first) for YOLO exports.
+    // Some exports use [1, N, C] (channels-last). Mis-detecting this causes
+    // nonsense boxes/scores and frequent false positives.
     final outShape = interpreter.getOutputTensor(0).shape;
     final outCount = outShape.reduce((a, b) => a * b);
     final output = List.filled(outCount, 0.0).reshape(outShape);
     interpreter.run(input, output);
 
-    // Support both channel-first [1,C,N] and channel-last [1,N,C]
+    if (outShape.length != 3) {
+      print('VehicleDetector: unsupported output shape $outShape');
+      return [];
+    }
+
     final detections = <Map<String, dynamic>>[];
-    final channelDim = outShape[1];
-    final otherDim = outShape[2];
-    final channelsFirst = (channelDim > otherDim);
-    final channelCount = channelsFirst ? outShape[1] : outShape[2];
-    final count = channelsFirst ? outShape[2] : outShape[1];
 
-    print('VehicleDetector: output shape ${outShape}, channelsFirst=$channelsFirst, channels=$channelCount, detections=$count');
+    final dim1 = outShape[1];
+    final dim2 = outShape[2];
+    bool looksLikeChannels(int d) => d > 0 && d <= 64;
 
-    // YOLOv11 actual format: [1, 6, 8400]
-    // Channels: [0]=x, [1]=y, [2]=w, [3]=h, [4]=confidence, [5]=class_scores (might be 2 classes packed)
-    final hasObj = true; // YOLOv11 always has objectness at channel 4
-    final numClasses = 2; // YOLOv11 model has exactly 2 classes: vehicle and plate
+    final channelsFirst = (looksLikeChannels(dim1) && !looksLikeChannels(dim2))
+        ? true
+        : (looksLikeChannels(dim2) && !looksLikeChannels(dim1))
+            ? false
+            : dim1 < dim2; // fallback: smaller dimension is usually channels
+
+    final channelCount = channelsFirst ? dim1 : dim2;
+    final count = channelsFirst ? dim2 : dim1;
+
+    print(
+      'VehicleDetector: output shape $outShape, channelsFirst=$channelsFirst, channels=$channelCount, detections=$count',
+    );
+
+    final numClasses = labels.length;
+    if (channelCount < 4 + numClasses) {
+      print(
+        'VehicleDetector: output has too few channels ($channelCount) for $numClasses classes',
+      );
+      return [];
+    }
+
+    // Generic YOLO-like decoding:
+    // - first 4 channels are box (cx, cy, w, h)
+    // - last `numClasses` channels are class logits/probs
+    // - optional objectness channel sits right before the class channels
+    final classStart = channelCount - numClasses;
+    final objChannel = classStart - 1;
+    final hasObj = objChannel >= 4;
 
     double sigmoid(double x) => 1.0 / (1.0 + exp(-x));
+
+    double normOrSigmoid(double v) {
+      // Many TFLite exports already output normalized values in [0, 1].
+      // If it's outside that range, treat it as a logit.
+      if (v >= 0.0 && v <= 1.0) return v;
+      return sigmoid(v);
+    }
 
     double getVal(int c, int i) {
       if (channelsFirst) {
@@ -118,46 +155,34 @@ class VehicleDetector {
       double rawW = getVal(2, i);
       double rawH = getVal(3, i);
 
-      // apply sigmoid to centers (common in many YOLO-like exports)
-      final cx = sigmoid(rawCx);
-      final cy = sigmoid(rawCy);
+      final cx = normOrSigmoid(rawCx);
+      final cy = normOrSigmoid(rawCy);
 
-      // w,h may be logits; assume they are normalized already, but if too large, apply sigmoid
-      final wRaw = rawW;
-      final hRaw = rawH;
-      final w = (wRaw.abs() > 1.0) ? sigmoid(wRaw) : wRaw.abs();
-      final h = (hRaw.abs() > 1.0) ? sigmoid(hRaw) : hRaw.abs();
+      final w = normOrSigmoid(rawW.abs());
+      final h = normOrSigmoid(rawH.abs());
 
-      // YOLOv11 format: channel 4 is confidence/objectness
-      double obj = sigmoid(getVal(4, i));
+      final obj = hasObj ? normOrSigmoid(getVal(objChannel, i)) : 1.0;
 
-      // YOLOv11: class probabilities - try to extract from channel 5
-      // With 6 channels total and 2 classes, the model might:
-      // Option A: Use channel 5 as a combined score or one class
-      // Option B: Have implicit second class as (1 - firstClass)
       int bestClass = -1;
       double bestScore = -double.infinity;
-      
-      // Try reading from channel 5 (assuming it's vehicle probability)
-      final vehicleProb = sigmoid(getVal(5, i));
-      final plateProb = 1.0 - vehicleProb; // Implicit plate probability
-      
-      // Compare both
-      final vehicleScore = obj * vehicleProb;
-      final plateScore = obj * plateProb;
-      
-      if (vehicleScore > plateScore) {
-        bestClass = 0; // vehicle
-        bestScore = vehicleScore;
-      } else {
-        bestClass = 1; // plate
-        bestScore = plateScore;
+      double bestClassProb = 0.0;
+
+      for (int c = 0; c < numClasses; c++) {
+        final clsProb = normOrSigmoid(getVal(classStart + c, i));
+        final score = obj * clsProb;
+        if (score > bestScore) {
+          bestScore = score;
+          bestClass = c;
+          bestClassProb = clsProb;
+        }
       }
 
       if (bestScore < confThreshold) continue;
       
       // Debug: log detections with valid class IDs
-      print('Detection: classId=$bestClass, score=${bestScore.toStringAsFixed(3)}, vehicleProb=${vehicleProb.toStringAsFixed(3)}, plateProb=${plateProb.toStringAsFixed(3)}');
+      print(
+        'Detection: classId=$bestClass, score=${bestScore.toStringAsFixed(3)}, obj=${obj.toStringAsFixed(3)}, classProb=${bestClassProb.toStringAsFixed(3)}',
+      );
 
       // Map box from letterboxed input coordinates back to original image normalized coords
       // Model likely outputs normalized coords relative to the input size (including padding)
@@ -272,7 +297,7 @@ class VehicleDetector {
       final label = (classId >= 0 && classId < labels.length) ? labels[classId] : 'unknown_$classId';
       final dets = byClass[classId]!;
       final isVehicle = (classId == vehicleClassId);
-      final type = isVehicle ? '🚗' : '📍';
+      final type = isVehicle ? '' : '';
       
       print('  $type $label (ID: $classId): ${dets.length} detections');
       
@@ -287,12 +312,6 @@ class VehicleDetector {
       }
     }
     
-    // Summary line
-    final vehicleCount = detections.where((d) => (d['classId'] as int?) == vehicleClassId).length;
-    final plateCount = detections.where((d) => (d['classId'] as int?) == plateClassId).length;
-    
-    print('\nSUMMARY: $vehicleCount vehicle(s) + $plateCount plate(s) detected');
-    print('=======================================\n');
   }
 
   /// Return debug info for each output channel: min/max/mean and top-k indices/values.
@@ -319,9 +338,9 @@ class VehicleDetector {
       });
     });
 
-    final outShape = interpreter.getOutputTensor(0).shape; // e.g. [1, 9, 8400]
+    final outShape = interpreter.getOutputTensor(0).shape; // e.g. [1, 6, 8400]
     final outCount = outShape.reduce((a, b) => a * b);
-    final output = List.filled(outCount, 0).reshape(outShape);
+    final output = List.filled(outCount, 0.0).reshape(outShape);
 
     try {
       interpreter.run(input, output);
@@ -329,15 +348,34 @@ class VehicleDetector {
       return [];
     }
 
-    final channelCount = outShape[1];
-    final channelLen = outShape[2];
+    if (outShape.length != 3) return [];
+
+    final dim1 = outShape[1];
+    final dim2 = outShape[2];
+    bool looksLikeChannels(int d) => d > 0 && d <= 64;
+
+    final channelsFirst = (looksLikeChannels(dim1) && !looksLikeChannels(dim2))
+        ? true
+        : (looksLikeChannels(dim2) && !looksLikeChannels(dim1))
+            ? false
+            : dim1 < dim2;
+
+    final channelCount = channelsFirst ? dim1 : dim2;
+    final channelLen = channelsFirst ? dim2 : dim1;
+
+    double getVal(int c, int i) {
+      if (channelsFirst) {
+        final v = output[0][c][i];
+        return (v is num) ? v.toDouble() : double.tryParse(v.toString()) ?? 0.0;
+      } else {
+        final v = output[0][i][c];
+        return (v is num) ? v.toDouble() : double.tryParse(v.toString()) ?? 0.0;
+      }
+    }
     final List<Map<String, dynamic>> info = [];
     for (var c = 0; c < channelCount; c++) {
       // flatten channel values
-      final List<double> vals = List.generate(channelLen, (i) {
-        final v = output[0][c][i];
-        return (v is num) ? v.toDouble() : double.tryParse(v.toString()) ?? 0.0;
-      });
+      final List<double> vals = List.generate(channelLen, (i) => getVal(c, i));
 
       double minv = double.infinity;
       double maxv = -double.infinity;

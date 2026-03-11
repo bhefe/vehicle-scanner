@@ -12,7 +12,7 @@ class CameraScreen extends StatefulWidget {
 
 class _CameraScreenState extends State<CameraScreen> {
   CameraController? controller;
-  bool _showCamera = false; // Whether to show camera view
+  bool _showCamera = false; // show cam view or not
 
   @override
   void initState() {
@@ -42,18 +42,15 @@ class _CameraScreenState extends State<CameraScreen> {
 
   void _takePicture() async {
     if (controller != null && controller!.value.isInitialized) {
-      final context = this.context;
       try {
         final picture = await controller!.takePicture();
-        if (mounted) {
-          Navigator.pushNamed(context, "/process", arguments: picture.path);
-        }
+        if (!mounted) return;
+        Navigator.pushNamed(context, "/process", arguments: picture.path);
       } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Failed to take picture')),
-          );
-        }
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to take picture')),
+        );
       }
     }
   }
@@ -272,19 +269,16 @@ class _CameraScreenState extends State<CameraScreen> {
                           height: 56,
                           child: ElevatedButton(
                             onPressed: () async {
-                              final context = this.context;
                               try {
                                 final XFile? file = await ImagePicker().pickImage(source: ImageSource.gallery);
-                                if (file != null && mounted) {
-                                  Navigator.pushNamed(context, "/process", arguments: file.path);
-           
-                                }
+                                if (file == null) return;
+                                if (!mounted) return;
+                                Navigator.pushNamed(context, "/process", arguments: file.path);
                               } catch (e) {
-                                if (mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(content: Text('Failed to pick image from gallery')),
-                                  );
-                                }
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Failed to pick image from gallery')),
+                                );
                               }
                             },
                             style: ElevatedButton.styleFrom(
@@ -331,22 +325,9 @@ class _CameraScreenState extends State<CameraScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      children: [
-                        const SizedBox(width: 8),
-                        // Text(
-                        //   'Tips',
-                        //   style: TextStyle(
-                        //     fontSize: 16,
-                        //     fontWeight: FontWeight.w600,
-                        //     color: Colors.amber.shade900,
-                        //   ),
-                        // ),
-                      ],
-                    ),
                     const SizedBox(height: 10),
                     Text(
-                      '• Ensure good lighting\n• Avoid glare and shadows',
+                      ' Ensure good lighting\n Avoid glare and shadows',
                       style: TextStyle(
                         fontSize: 14,
                         color: Colors.amber.shade800,
